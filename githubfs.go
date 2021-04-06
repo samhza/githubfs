@@ -17,7 +17,7 @@ var (
 	zeroTime = time.Time{}
 )
 
-type gitHubFS struct {
+type fsys struct {
 	owner, repo, rev string
 
 	trees map[string]tree
@@ -28,14 +28,14 @@ type gitHubFS struct {
 }
 
 func New(owner, repo, revision string) fs.FS {
-	return &gitHubFS{owner: owner, repo: repo, rev: revision,
+	return &fsys{owner: owner, repo: repo, rev: revision,
 		trees: make(map[string]tree), files: make(map[string][]byte)}
 }
 
 type tree struct {
-	SHA  string       `json:"sha"`
-	URL  string       `json:"url"`
-	Tree []treeMember `json:"tree"`
+	SHA  string      `json:"sha"`
+	URL  string      `json:"url"`
+	Tree []treeEntry `json:"tree"`
 	name string
 }
 
@@ -53,7 +53,7 @@ const (
 	fileTree fileType = "tree"
 )
 
-type treeMember struct {
+type treeEntry struct {
 	Path string   `json:"path"`
 	Mode string   `json:"mode"`
 	Type fileType `json:"type"`
@@ -62,32 +62,32 @@ type treeMember struct {
 	data *bytes.Reader
 }
 
-func (f *treeMember) isDir() bool {
+func (f *treeEntry) isDir() bool {
 	return f.Mode == "040000"
 }
-func (f *treeMember) Close() error {
+func (f *treeEntry) Close() error {
 	return nil
 }
-func (f *treeMember) Read(p []byte) (int, error) {
+func (f *treeEntry) Read(p []byte) (int, error) {
 	if f.isDir() {
 		return 0, errors.New("is a directory")
 	}
 	return f.data.Read(p)
 }
-func (f *treeMember) ReadAt(p []byte, off int64) (n int, err error) {
+func (f *treeEntry) ReadAt(p []byte, off int64) (n int, err error) {
 	if f.isDir() {
 		return 0, errors.New("is a directory")
 	}
 	return f.data.ReadAt(p, off)
 }
-func (f *treeMember) Seek(offset int64, whence int) (int64, error) {
+func (f *treeEntry) Seek(offset int64, whence int) (int64, error) {
 	if f.isDir() {
 		return 0, errors.New("is a directory")
 	}
 	return f.data.Seek(offset, whence)
 }
-func (f *treeMember) Stat() (fs.FileInfo, error) { return f.stat() }
-func (f *treeMember) ReadDir(n int) ([]fs.DirEntry, error) {
+func (f *treeEntry) Stat() (fs.FileInfo, error) { return f.stat() }
+func (f *treeEntry) ReadDir(n int) ([]fs.DirEntry, error) {
 	if !f.isDir() {
 		return nil, errors.New("not a directory")
 	}
@@ -115,20 +115,20 @@ func (f *treeMember) ReadDir(n int) ([]fs.DirEntry, error) {
 	return out, nil
 }
 
-func (f *treeMember) stat() (*treeMemberInfo, error) {
-	return &treeMemberInfo{*f}, nil
+func (f *treeEntry) stat() (*entryInfo, error) {
+	return &entryInfo{*f}, nil
 }
 
-type treeMemberInfo struct{ treeMember }
+type entryInfo struct{ treeEntry }
 
-func (f treeMemberInfo) Name() string {
-	return f.treeMember.Path
+func (f entryInfo) Name() string {
+	return f.treeEntry.Path
 }
-func (f treeMemberInfo) Size() int64 {
-	return f.treeMember.Size
+func (f entryInfo) Size() int64 {
+	return f.treeEntry.Size
 }
-func (f treeMemberInfo) Mode() fs.FileMode {
-	switch f.treeMember.Mode {
+func (f entryInfo) Mode() fs.FileMode {
+	switch f.treeEntry.Mode {
 	case "040000":
 		return fs.FileMode(fs.ModeDir | 0755)
 	case "100644":
@@ -138,50 +138,50 @@ func (f treeMemberInfo) Mode() fs.FileMode {
 	}
 	return fs.FileMode(0644)
 }
-func (f treeMemberInfo) IsDir() bool {
-	return f.treeMember.isDir()
+func (f entryInfo) IsDir() bool {
+	return f.treeEntry.isDir()
 }
-func (f treeMemberInfo) ModTime() time.Time {
+func (f entryInfo) ModTime() time.Time {
 	return zeroTime
 }
-func (f treeMemberInfo) Sys() interface{} {
-	return f.treeMember.data
+func (f entryInfo) Sys() interface{} {
+	return f.treeEntry.data
 }
-func (f treeMemberInfo) Type() fs.FileMode {
+func (f entryInfo) Type() fs.FileMode {
 	return f.Mode().Type()
 }
-func (f treeMemberInfo) Info() (fs.FileInfo, error) {
+func (f entryInfo) Info() (fs.FileInfo, error) {
 	return f, nil
 }
 
-func (f *gitHubFS) Open(path string) (fs.File, error) {
+func (f *fsys) Open(path string) (fs.File, error) {
 	f.filesLock.Lock()
 	defer f.filesLock.Unlock()
-	member, err := f.file(path)
+	entry, err := f.file(path)
 	if err != nil {
 		return nil, err
 	}
-	switch member.Type {
+	switch entry.Type {
 	case fileBlob:
 		content, ok := f.files[path]
 		if !ok {
 			var blob blob
-			err := reqJSON(member.URL, &blob)
+			err := reqJSON(entry.URL, &blob)
 			if err != nil {
 				return nil, err
 			}
 			content = blob.Content
 			f.files[path] = content
 		}
-		member.data = bytes.NewReader(content)
-		return member, nil
+		entry.data = bytes.NewReader(content)
+		return entry, nil
 	case fileTree:
-		return member, nil
+		return entry, nil
 	}
-	return nil, fmt.Errorf("%s: invalid file type", member.Type)
+	return nil, fmt.Errorf("%s: invalid file type", entry.Type)
 }
 
-func (f *gitHubFS) tree(path string) (*tree, error) {
+func (f *fsys) tree(path string) (*tree, error) {
 	f.treesLock.Lock()
 	defer f.treesLock.Unlock()
 	if tree, ok := f.trees[path]; ok {
@@ -192,7 +192,7 @@ func (f *gitHubFS) tree(path string) (*tree, error) {
 	if path == "." {
 		err = reqJSON(f.resURL(f.rev, fileTree), &tree)
 	} else {
-		var file *treeMember
+		var file *treeEntry
 		file, err = f.file(path)
 		if err == nil && file.Type != fileTree {
 			err = fmt.Errorf("%s: not a directory", path)
@@ -205,13 +205,13 @@ func (f *gitHubFS) tree(path string) (*tree, error) {
 	return &tree, nil
 }
 
-func (f *gitHubFS) file(fpath string) (*treeMember, error) {
+func (f *fsys) file(fpath string) (*treeEntry, error) {
 	if fpath == "." {
 		tree, err := f.tree(".")
 		if err != nil {
 			return nil, err
 		}
-		return &treeMember{
+		return &treeEntry{
 			Path: f.repo,
 			Mode: "04000",
 			Type: fileTree,
@@ -227,15 +227,15 @@ func (f *gitHubFS) file(fpath string) (*treeMember, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, member := range parent.Tree {
-		if member.Path == file {
-			return &member, nil
+	for _, entry := range parent.Tree {
+		if entry.Path == file {
+			return &entry, nil
 		}
 	}
 	return nil, fs.ErrNotExist
 }
 
-func (f gitHubFS) resURL(name string, filetype fileType) string {
+func (f fsys) resURL(name string, filetype fileType) string {
 	return fmt.Sprintf("https://api.github.com/repos/%s/%s/git/%ss/%s",
 		f.owner, f.repo, filetype, name)
 }
