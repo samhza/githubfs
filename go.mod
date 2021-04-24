@@ -1,3 +1,3 @@
-module git.sr.ht/~samhza/githubfs
+module go.samhza.com/githubfs
 
 go 1.16
